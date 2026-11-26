@@ -90,6 +90,7 @@
   .badge.skipped { color: #c2c9d8; background: rgba(139,147,167,.15); border-color: rgba(139,147,167,.4); }
   .badge.incomplete { color: #ffd489; background: rgba(245,181,68,.12); border-color: rgba(245,181,68,.4); }
   .badge.pending { color: #a9c6ff; background: rgba(79,140,255,.12); border-color: rgba(79,140,255,.4); }
+  .badge.waiting { color: #d9b8ff; background: rgba(170,120,255,.12); border-color: rgba(170,120,255,.42); }
   .req {
     border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
     margin-bottom: 14px; background: var(--panel);
@@ -147,7 +148,7 @@
 <header>
   <div>
     <h1>站内文档搜索 · 影子对照网关</h1>
-    <div class="sub">旧版即时应答，新版影子对照；封存后的轮次不再接受提交，迟到响应一律丢弃。</div>
+    <div class="sub">旧版即时应答，新版影子对照；封存后的轮次不再接受新提交，正在等待旧版的搜索会留在原轮并标为未完成，其结果仍会返回给提交方。</div>
   </div>
   <div class="spacer"></div>
   <span class="pill">当前轮次 <b id="hdr-round">-</b></span>
@@ -162,6 +163,10 @@
       <button id="btn-new-round" class="primary">开启一轮对照</button>
       <button id="btn-seal" class="danger">封存本轮并另开一轮</button>
       <span class="hint" id="round-hint"></span>
+    </div>
+    <div class="hint" style="margin-bottom:12px;">
+      封存时若有搜索仍在等待旧版，它们会留在原轮并标为「未完成」；旧版结果返回后
+      仍会显示在下方提交区（注明所属轮次），新轮次可立即提交。
     </div>
     <div class="row">
       <label class="hint" for="delay-input">新版延迟（毫秒，仅影响之后发起的影子请求）</label>
@@ -198,7 +203,7 @@
 
 <script>
 const STATUS_LABEL = {
-  pending: "进行中", matched: "一致", mismatch: "不一致",
+  waiting: "等待旧版", pending: "进行中", matched: "一致", mismatch: "不一致",
   failed: "失败", skipped: "跳过", incomplete: "未完成",
 };
 const $ = (id) => document.getElementById(id);
@@ -260,7 +265,9 @@ function renderRoundList(state) {
         ${switchTag}
         <span class="counts">${counts || "<span>无请求</span>"}</span>
         <span class="spacer" style="flex:1"></span>
-        <span class="hint">共 ${r.request_count} 条${r.pending_count ? `，在途 ${r.pending_count}` : ""}</span>
+        <span class="hint">共 ${r.request_count} 条${
+          r.waiting_legacy_count ? `，等待旧版 ${r.waiting_legacy_count}` : ""
+        }${r.pending_count ? `，在途 ${r.pending_count}` : ""}</span>
       </div>`;
   }).join("");
   list.querySelectorAll(".rounditem").forEach((el) => {
@@ -273,6 +280,9 @@ function renderRoundList(state) {
 
 function renderPositions(record) {
   const cmp = record.comparison;
+  if (record.legacy_pending) {
+    return `<div class="empty">等待旧版响应…（本条已计入本轮，但不占用影子名额）</div>`;
+  }
   if (record.legacy.error) {
     return `<div class="empty">旧版请求失败：${esc(record.legacy.error)}（未发起影子请求）</div>`;
   }
@@ -325,9 +335,11 @@ function renderRequests(round) {
           ${renderPositions(r)}
           <div class="legacy-out">
             <div>旧版响应（立即返回，前 ${r.legacy.doc_ids.length} 个编号）：
-              ${r.legacy.doc_ids.length
-                ? r.legacy.doc_ids.map((d) => `<code>${esc(d)}</code>`).join(" → ")
-                : "<span>（空结果）</span>"}
+              ${r.legacy_pending
+                ? "<span>（等待旧版返回…）</span>"
+                : r.legacy.doc_ids.length
+                  ? r.legacy.doc_ids.map((d) => `<code>${esc(d)}</code>`).join(" → ")
+                  : "<span>（空结果）</span>"}
             </div>
           </div>
         </div>
@@ -354,11 +366,15 @@ function renderBanner(round) {
   const reasons = round.blockers.length
     ? `<ul>${round.blockers.map((b) => `<li>${esc(b)}</li>`).join("")}</ul>`
     : "";
+  const waiting = round.waiting_legacy_count
+    ? `<div class="hint">本轮还有 ${round.waiting_legacy_count} 条搜索在等待旧版响应；返回前不会提示可切换，也不占用影子名额。</div>`
+    : "";
   el.innerHTML = `
     <div class="banner warn">
       <span class="icon">!</span>
       <div>
         <div><b>暂不可切换。</b>${label}；需要至少 1 条请求且全部对照一致。</div>
+        ${waiting}
         ${reasons}
       </div>
     </div>`;
@@ -443,16 +459,27 @@ async function submitSearch(event) {
     });
     const elapsed = Math.round(performance.now() - started);
     const ids = res.legacy.doc_ids || [];
+    const sealedNote = res.sealed
+      ? `<div class="hint" style="margin-top:6px;color:#ffd489;">
+           提交期间本轮 ${esc(res.round_id)} 已被封存：本条结果照常返回给你，
+           但已作为「未完成」留在原轮，本轮明细不再改动，也不会再发影子请求。
+         </div>`
+      : "";
     $("last-legacy").innerHTML = `
       <div>
-        旧版响应 ${elapsed}ms 返回（轮次 ${esc(res.round_id)}，第 ${res.round.seq ?? "?"} 条）：
-        ${ids.length
-          ? ids.map((d) => `<code>${esc(d)}</code>`).join(" → ")
-          : "<span>（空结果）</span>"}
+        旧版响应 ${elapsed}ms 返回（所属轮次 ${esc(res.round_id)}，第 ${res.round.seq ?? "?"} 条）：
+        ${res.legacy.error
+          ? `<span style="color:#ffb0b0">${esc(res.legacy.error)}</span>`
+          : ids.length
+            ? ids.map((d) => `<code>${esc(d)}</code>`).join(" → ")
+            : "<span>（空结果）</span>"}
       </div>
       <div class="hint" style="margin-top:6px;">
-        影子请求：${res.shadow.launched ? "已发起（后台对照中）" : `未发起（${esc(res.shadow.status)}）`}
-      </div>`;
+        影子请求：${res.shadow.launched
+          ? "已发起（后台对照中）"
+          : `未发起（${esc(STATUS_LABEL[res.shadow.status] || res.shadow.status)}）`}
+      </div>
+      ${sealedNote}`;
     input.value = "";
     viewingRoundId = null;
     refresh();
@@ -478,14 +505,18 @@ async function openRound() {
 async function sealRound() {
   const state = lastState;
   if (!state || !state.current_round_id) return;
-  const wasEmpty = (state.current_round?.request_count ?? 0) === 0;
+  const round = state.current_round;
+  const wasEmpty = (round?.request_count ?? 0) === 0;
+  const waiting = round?.waiting_legacy_count ?? 0;
   try {
     const res = await api(`/api/rounds/${encodeURIComponent(state.current_round_id)}/seal`, { method: "POST" });
     viewingRoundId = res.round.id;
     toast(
       wasEmpty
         ? `已封存空轮次 ${res.round.id}，并开启 ${res.new_round?.id || "新一轮"}。`
-        : `已封存 ${res.round.id}，迟到响应将不再写入。`
+        : waiting
+          ? `已封存 ${res.round.id}：${waiting} 条等待旧版的搜索保持「未完成」，结果仍会显示在提交区；已开启 ${res.new_round?.id || "新一轮"}。`
+          : `已封存 ${res.round.id}，迟到响应将不再写入。`
     );
     refresh();
   } catch (err) { toast(err.message, true); }

@@ -8,11 +8,19 @@ query to the candidate build in the background.
 * At most ``MAX_INFLIGHT_SHADOWS`` (4) shadow calls may be in flight at once
   across all rounds.  When the cap is reached a submission is recorded as
   *skipped* instead of launching a shadow call.
-* A round can be sealed at any time.  Sealing freezes its results and (by
-  default) opens a fresh round.  Late shadow responses for a sealed round are
-  discarded and can never change the frozen comparison.
-* A round is switch-ready only when it holds at least one request and every
-  request matched.
+* A round can be sealed at any time, even while legacy replies are still
+  outstanding.  Sealing freezes its results and (by default) opens a fresh
+  round, which accepts searches immediately.  Requests that were waiting or
+  shadowing at seal time are kept in the sealed round and marked *incomplete*.
+  Their legacy replies are still returned to the submitting browser (tagged
+  with the owning round) but never written into the frozen round, and no
+  shadow is launched for them.
+* A submission is recorded in its round *before* the legacy call is made, so a
+  legacy reply that is still outstanding can never lose its place.  Such a
+  request is *waiting* and does not occupy a shadow slot; the slot is only
+  reserved once the legacy reply comes back and a shadow is actually launched.
+* A round is switch-ready only when it holds at least one request, nothing is
+  still waiting on the legacy reply, and every request matched.
 """
 from __future__ import annotations
 
@@ -107,6 +115,11 @@ def create_app(
         detail = None
         error = None
         try:
+            # The round may have been sealed between reserving the slot and
+            # this task starting; never shadow a sealed round.
+            if not state.shadow_is_live(round_id, request_id):
+                state.release_shadow(request_id)
+                return
             payload = await backend.search(
                 "candidate",
                 query,
@@ -173,11 +186,15 @@ def create_app(
 
     @app.post("/api/rounds")
     async def open_new_round():
-        """Open a new round, sealing the current open one first if necessary."""
-        result = state.open_round()
+        """Seal the current round if it is still open, then open a new one.
+
+        Safe to call while legacy replies are outstanding: those requests stay
+        in the sealed round as *incomplete* and the new round is usable at once.
+        """
+        result = state.seal_then_open()
         return {
-            "round": result["round"],
-            "sealed_round": result["sealed_round"],
+            "round": result["new_round"],
+            "sealed_round": result["round"],
             "state": state.state(),
         }
 
@@ -208,26 +225,45 @@ def create_app(
 
     @app.post("/api/search")
     async def submit_search(submission: SearchSubmission, request: Request):
-        """Answer with the legacy result immediately; shadow asynchronously."""
+        """Answer with the legacy result; shadow asynchronously.
+
+        The request is recorded in its round *before* the legacy call, so a
+        seal that happens while the legacy reply is outstanding keeps the
+        request in that round instead of dropping it.  Such a request does not
+        take a shadow slot; if the round is sealed before the legacy reply
+        arrives, the reply is still returned to this caller with the owning
+        round id, the seal is left untouched and no shadow is launched.
+        """
         query = submission.query.strip()
         if not query:
             raise HTTPException(status_code=422, detail="搜索词不能为空")
 
-        round_obj = (
-            state.rounds.get(submission.round_id)
-            if submission.round_id
-            else state.current_round()
-        )
-        if round_obj is None:
-            raise HTTPException(status_code=404, detail="轮次不存在")
-        if round_obj.sealed:
-            raise HTTPException(
-                status_code=409, detail="该轮次已封存，请开启新一轮后再提交"
-            )
+        if submission.round_id:
+            existing = state.lookup(submission.round_id)
+            if existing is None:
+                raise HTTPException(status_code=404, detail="轮次不存在")
+            if existing == "sealed":
+                raise HTTPException(
+                    status_code=409, detail="该轮次已封存，请开启新一轮后再提交"
+                )
 
         backend: HttpSearchBackend = request.app.state.backend
 
-        # 1) Legacy call, synchronously: the browser gets this response.
+        # 1) Record the submission (waiting on legacy, no slot yet).  This is
+        #    the single atomic acceptance point: without an explicit round the
+        #    current round is chosen under the same lock, so a concurrent seal
+        #    can never drop or misroute the request.
+        delay_ms = state.snapshot_settings()["shadow_delay_ms"]
+        record = state.accept_request(
+            submission.round_id, query, settings.comparison_limit, delay_ms
+        )
+        if record is None:
+            raise HTTPException(
+                status_code=409, detail="该轮次已封存，请开启新一轮后再提交"
+            )
+        round_obj = state.rounds[record.round_id]
+
+        # 2) Legacy call, synchronously: the caller gets this response.
         legacy_doc_ids: Optional[List[str]] = None
         legacy_results = None
         legacy_error: Optional[str] = None
@@ -239,24 +275,44 @@ def create_app(
             legacy_doc_ids = extract_doc_ids(payload)
         except SearchBackendError as exc:
             legacy_error = str(exc)
+        except asyncio.CancelledError:
+            # Client gone / shutdown: leave the round consistent rather than
+            # stuck in ``waiting``, which would block the switch hint.
+            state.resolve_legacy(
+                round_obj.id, record.id, legacy_error="旧版请求被取消"
+            )
+            raise
+        except Exception:
+            # Never leave the record stuck in ``waiting`` (which would block
+            # the round's switch hint forever) on an unexpected failure.
+            legacy_error = "旧版请求出现未预期错误"
+            logger.exception("unexpected legacy failure for %s", record.id)
 
-        # 2) Record the request and reserve a shadow slot (atomic, under lock).
-        delay_ms = state.snapshot_settings()["shadow_delay_ms"]
-        record = state.begin_request(
+        # 3) Write the legacy reply back and reserve a shadow slot.  ``None``
+        #    means the round was sealed while the legacy call was in flight:
+        #    the round keeps the request as incomplete, nothing is written to
+        #    it, and no shadow is launched.
+        applied = state.resolve_legacy(
             round_obj.id,
-            query,
-            settings.comparison_limit,
+            record.id,
             legacy_doc_ids=legacy_doc_ids,
             legacy_results=legacy_results,
             legacy_error=legacy_error,
+            delay_ms=delay_ms,
         )
-        if record is None:
-            raise HTTPException(
-                status_code=409, detail="该轮次已封存，请开启新一轮后再提交"
-            )
+        sealed_before_reply = applied is None
+        shadow_status = (
+            state.get_record_status(round_obj.id, record.id)
+            if sealed_before_reply
+            else applied
+        )
 
-        # 3) Fire-and-forget shadow call when a slot was reserved.
-        if record.shadow.status == PENDING and legacy_doc_ids is not None:
+        # 4) Fire-and-forget shadow call when a slot was reserved.
+        if (
+            not sealed_before_reply
+            and applied == PENDING
+            and legacy_doc_ids is not None
+        ):
             try:
                 task = asyncio.create_task(
                     run_shadow(
@@ -273,6 +329,7 @@ def create_app(
                 state.complete_shadow(
                     round_obj.id, record.id, FAILED, error="无法启动影子任务"
                 )
+                shadow_status = FAILED
             else:
                 state.register_task(round_obj.id, task)
 
@@ -282,14 +339,21 @@ def create_app(
             "request_id": record.id,
             "seq": record.seq,
             "query": query,
+            "sealed": sealed_before_reply,
             "legacy": {
                 "doc_ids": legacy_doc_ids or [],
                 "results": legacy_results or [],
                 "error": legacy_error,
             },
             "shadow": {
-                "status": record.shadow.status,
-                "launched": record.shadow.status == PENDING,
+                "status": shadow_status,
+                "launched": (not sealed_before_reply) and applied == PENDING,
+                "reason": (
+                    "提交期间本轮被其他值班员封存；结果仍返回给你，"
+                    "本轮明细不再更新，也不会再发影子请求"
+                    if sealed_before_reply
+                    else None
+                ),
             },
             "round": round_payload,
         }

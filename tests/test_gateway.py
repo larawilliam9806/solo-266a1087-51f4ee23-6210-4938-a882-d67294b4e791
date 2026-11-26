@@ -7,6 +7,7 @@ deterministically.
 import asyncio
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 import pytest
@@ -34,6 +35,7 @@ class FakeSearch:
 
     def __init__(self):
         self.candidate_delay = 0.0
+        self.legacy_delay = 0.0
         self.candidate_override = None  # callable(query) -> list[str] | Exception
         self.legacy_override = None
         self.calls = []
@@ -48,6 +50,8 @@ class FakeSearch:
         if request.url.path == "/health":
             return httpx.Response(200, json={"status": "ok"})
         if host == "legacy.test":
+            if self.legacy_delay:
+                await asyncio.sleep(self.legacy_delay)
             if self.legacy_override is not None:
                 outcome = self.legacy_override(q)
                 if isinstance(outcome, Exception):
@@ -286,3 +290,184 @@ def test_index_page_served(client):
     res = client.get("/")
     assert res.status_code == 200
     assert "影子对照网关" in res.text
+
+
+# --------------------------------------------------------------------------
+# Sealing while legacy replies are still outstanding.
+# --------------------------------------------------------------------------
+
+def wait_for_record(client, round_id, predicate, timeout=3.0):
+    """Poll a single round document until ``predicate(record)`` holds."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        payload = client.get(f"/api/rounds/{round_id}").json()
+        records = payload.get("requests") or []
+        if records and predicate(records[0]):
+            return payload
+        time.sleep(0.02)
+    raise AssertionError("record condition not reached in time")
+
+
+def search_in_background(client, query):
+    return client.post("/api/search", json={"query": query})
+
+
+def test_waiting_legacy_does_not_block_new_round(client, app):
+    """A seal while legacy is outstanding must not stop new searches."""
+    app.state.fake.legacy_delay = 0.8
+    rid = client.get("/api/state").json()["current_round_id"]
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(search_in_background, client, "慢查询")
+        # The submission is accepted (recorded as waiting) before legacy ends.
+        sealed_view = wait_for_record(
+            client, rid, lambda r: r["status"] == "waiting"
+        )
+        assert sealed_view["sealed_at"] is None
+
+        # Another on-call operator seals the round mid-flight.
+        sealed = client.post(f"/api/rounds/{rid}/seal").json()["round"]
+        new_round = client.post("/api/rounds").json()  # can always open one
+        assert new_round["round"]["id"] != rid
+
+        # A fresh round accepts and completes searches immediately.
+        app.state.fake.legacy_delay = 0.0
+        fresh = client.post("/api/search", json={"query": "新查询"})
+        assert fresh.status_code == 200
+        assert fresh.json()["round_id"] == new_round["round"]["id"]
+        assert fresh.json()["shadow"]["launched"] is True
+
+        late = pending.result(timeout=5)
+
+    # The late legacy reply is still returned to its submitter and tagged
+    # with the round it belonged to.
+    assert late.status_code == 200
+    body = late.json()
+    assert body["round_id"] == rid
+    assert body["sealed"] is True
+    assert body["legacy"]["doc_ids"] == DOCS
+    assert body["shadow"]["launched"] is False
+
+    # The sealed round kept it, marked incomplete, and the detail is frozen.
+    after = client.get(f"/api/rounds/{rid}").json()
+    assert after["sealed_at"] == sealed["sealed_at"]
+    assert after["requests"][0]["status"] == "incomplete"
+    assert after["requests"][0]["legacy"]["doc_ids"] == []
+    assert after["requests"][0]["shadow"]["candidate_doc_ids"] is None
+
+    # No shadow was sent for the sealed round, and the sealed round is never
+    # switch-ready.
+    candidates = [c for c in app.state.fake.calls if c[0] == "candidate.test"]
+    assert [c[1] for c in candidates] == ["新查询"]
+    assert after["can_switch"] is False
+
+
+def test_waiting_legacy_blocks_switch_hint(client, app):
+    """A round with an outstanding legacy reply must never say 可切换."""
+    app.state.fake.legacy_delay = 1.0
+    rid = client.get("/api/state").json()["current_round_id"]
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(search_in_background, client, "慢查询")
+        state = wait_for_record(client, rid, lambda r: r["status"] == "waiting")
+        assert state["can_switch"] is False
+        assert state["waiting_legacy_count"] == 1
+        assert "旧版" in " ".join(state["blockers"])
+
+        # Even the candidate-side record must never look switchable while the
+        # legacy reply is outstanding.
+        summary = client.get("/api/rounds").json()["rounds"][0]
+        assert summary["can_switch"] is False
+        assert summary["switch_blocked_by_waiting"] is True
+
+        pending.result(timeout=5)
+
+    state = wait_for(
+        client,
+        lambda s: s["current_round"]["counts"]["matched"] == 1,
+    )
+    assert state["current_round"]["waiting_legacy_count"] == 0
+    assert state["current_round"]["can_switch"] is True
+
+
+def test_waiting_legacy_does_not_take_shadow_slot(client, app):
+    """Requests waiting on legacy are not shadows and consume no slot."""
+    app.state.fake.legacy_delay = 0.3
+    app.state.fake.candidate_delay = 0.6
+
+    # Four searches all occupy slots after their legacy replies return; the
+    # fifth waits on legacy first.  While it waits, the shadow budget is full
+    # only because of the four actual shadow calls.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        slow = pool.submit(search_in_background, client, "第五")
+        wait_for_record(
+            client,
+            client.get("/api/state").json()["current_round_id"],
+            lambda r: r["status"] == "waiting",
+        )
+        # A waiting request is not a shadow: in-flight stays 0.
+        assert client.get("/api/state").json()["inflight"] == 0
+        slow.result(timeout=5)
+
+    state = wait_for(client, lambda s: s["current_round"]["request_count"] == 1)
+    assert state["current_round"]["counts"]["pending"] == 1
+
+
+def test_sealed_round_keeps_all_waiting_requests(client, app):
+    """Every request outstanding at seal time stays in the round, incomplete."""
+    app.state.fake.legacy_delay = 0.7
+    rid = client.get("/api/state").json()["current_round_id"]
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [pool.submit(search_in_background, client, f"查询{i}") for i in range(3)]
+        wait_for(
+            client,
+            lambda s: s["current_round"]["waiting_legacy_count"] == 3,
+        )
+        sealed = client.post(f"/api/rounds/{rid}/seal").json()["round"]
+
+    assert sealed["request_count"] == 3
+    assert sealed["counts"]["incomplete"] == 3
+    assert sealed["can_switch"] is False
+
+    # Sealed first, so an explicit submission to it is rejected.
+    res = client.post("/api/search", json={"query": "再试", "round_id": rid})
+    assert res.status_code == 409
+
+    for future in futures:
+        body = future.result(timeout=5).json()
+        assert body["sealed"] is True
+        assert body["round_id"] == rid
+    after = client.get(f"/api/rounds/{rid}").json()
+    assert after["requests"] == sealed["requests"]
+    assert after["counts"]["incomplete"] == 3
+
+
+def test_late_legacy_error_is_not_written_into_sealed_round(client, app):
+    app.state.fake.legacy_delay = 0.5
+    app.state.fake.legacy_override = lambda q: httpx.ConnectError("旧版挂了")
+    rid = client.get("/api/state").json()["current_round_id"]
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(search_in_background, client, "坏查询")
+        wait_for_record(client, rid, lambda r: r["status"] == "waiting")
+        client.post(f"/api/rounds/{rid}/seal")
+        body = future.result(timeout=5).json()
+
+    assert body["sealed"] is True
+    assert body["legacy"]["error"]
+    sealed = client.get(f"/api/rounds/{rid}").json()
+    assert sealed["requests"][0]["status"] == "incomplete"
+    assert sealed["requests"][0]["legacy"]["error"] is None
+
+
+def test_sealed_round_never_gets_second_shadow_attempt(client, app):
+    """A late legacy reply must not trigger a shadow after the round was sealed."""
+    app.state.fake.legacy_delay = 0.5
+    rid = client.get("/api/state").json()["current_round_id"]
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(search_in_background, client, "延迟影子")
+        wait_for_record(client, rid, lambda r: r["status"] == "waiting")
+        client.post(f"/api/rounds/{rid}/seal")
+        future.result(timeout=5)
+
+    time.sleep(1.0)
+    candidates = [c for c in app.state.fake.calls if c[0] == "candidate.test"]
+    assert candidates == []
