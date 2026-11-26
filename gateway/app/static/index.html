@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>站内文档搜索 · 影子对照网关</title>
+<style>
+  :root {
+    --bg: #0f1420;
+    --panel: #161d2c;
+    --panel-2: #1d2637;
+    --line: #2a3550;
+    --text: #e6ecf7;
+    --muted: #93a1bd;
+    --accent: #4f8cff;
+    --ok: #35c48a;
+    --bad: #ff6b6b;
+    --warn: #f5b544;
+    --skip: #8b93a7;
+    --idle: #6f7b95;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "PingFang SC", "Microsoft YaHei", -apple-system, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.55;
+  }
+  header {
+    padding: 20px 28px 16px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px 28px;
+    align-items: center;
+    background: linear-gradient(180deg, #131a29, #0f1420);
+  }
+  header h1 { font-size: 18px; margin: 0; font-weight: 600; letter-spacing: .3px; }
+  header .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .spacer { flex: 1; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 999px; padding: 5px 12px; font-size: 12px; color: var(--muted);
+  }
+  .pill b { color: var(--text); font-weight: 600; }
+  main { padding: 20px 28px 60px; max-width: 1180px; margin: 0 auto; }
+  section { margin-bottom: 22px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 18px 20px;
+  }
+  h2 { font-size: 14px; margin: 0 0 12px; font-weight: 600; color: #c9d5ea; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  button {
+    font: inherit; cursor: pointer; border-radius: 8px; padding: 8px 14px;
+    border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    transition: .15s;
+  }
+  button:hover:not(:disabled) { border-color: #3f5178; background: #223049; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover:not(:disabled) { background: #3f7df0; }
+  button.danger { color: #ffb4b4; }
+  input[type=text], input[type=number], select {
+    font: inherit; color: var(--text); background: #0e1421;
+    border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px;
+  }
+  input[type=text] { min-width: 320px; flex: 1; }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  .hint { color: var(--muted); font-size: 12px; }
+  .banner {
+    border-radius: 10px; padding: 12px 16px; border: 1px solid var(--line);
+    background: var(--panel-2); display: flex; gap: 10px; align-items: flex-start;
+  }
+  .banner.ok { border-color: rgba(53,196,138,.55); background: rgba(53,196,138,.10); }
+  .banner.warn { border-color: rgba(245,181,68,.5); background: rgba(245,181,68,.08); }
+  .banner .icon { font-weight: 700; }
+  .banner.ok .icon { color: var(--ok); }
+  .banner.warn .icon { color: var(--warn); }
+  .banner ul { margin: 6px 0 0; padding-left: 18px; color: var(--muted); }
+  .badge {
+    display: inline-block; padding: 1px 9px; border-radius: 999px;
+    font-size: 12px; border: 1px solid transparent; white-space: nowrap;
+  }
+  .badge.matched { color: #7ff0c0; background: rgba(53,196,138,.12); border-color: rgba(53,196,138,.35); }
+  .badge.mismatch, .badge.failed { color: #ffb0b0; background: rgba(255,107,107,.12); border-color: rgba(255,107,107,.4); }
+  .badge.skipped { color: #c2c9d8; background: rgba(139,147,167,.15); border-color: rgba(139,147,167,.4); }
+  .badge.incomplete { color: #ffd489; background: rgba(245,181,68,.12); border-color: rgba(245,181,68,.4); }
+  .badge.pending { color: #a9c6ff; background: rgba(79,140,255,.12); border-color: rgba(79,140,255,.4); }
+  .req {
+    border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
+    margin-bottom: 14px; background: var(--panel);
+  }
+  .req-head {
+    display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center;
+    padding: 12px 16px; background: var(--panel-2); border-bottom: 1px solid var(--line);
+  }
+  .req-head .q { font-weight: 600; }
+  .req-head .meta { color: var(--muted); font-size: 12px; }
+  .req-body { padding: 12px 16px 16px; }
+  .cmp { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .cmp th, .cmp td {
+    padding: 5px 10px; border-bottom: 1px solid rgba(42,53,80,.6); text-align: left;
+    font-variant-numeric: tabular-nums;
+  }
+  .cmp th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  .cmp td.rank { color: var(--muted); width: 48px; }
+  .cmp code {
+    background: #0e1421; border: 1px solid var(--line); border-radius: 5px;
+    padding: 1px 6px; font-size: 12px;
+  }
+  .cmp tr.diff td { background: rgba(255,107,107,.06); }
+  .cmp tr.diff td.mark { color: var(--bad); font-weight: 600; }
+  .cmp tr.same td.mark { color: var(--ok); }
+  .cmp td.mark { width: 56px; }
+  .legacy-out {
+    margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 10px;
+    color: var(--muted); font-size: 12px;
+  }
+  .legacy-out ol { margin: 6px 0 0; padding-left: 22px; }
+  .legacy-out code { color: #cfe0ff; }
+  .empty { color: var(--muted); padding: 18px 2px; font-size: 13px; }
+  .roundlist { display: flex; flex-direction: column; gap: 8px; }
+  .rounditem {
+    display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+    padding: 9px 12px; border: 1px solid var(--line); border-radius: 9px;
+    background: var(--panel-2); cursor: pointer;
+  }
+  .rounditem.active { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(79,140,255,.35) inset; }
+  .rounditem .rid { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .counts { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+  .counts span b { color: var(--text); }
+  .toast {
+    position: fixed; right: 22px; bottom: 22px; background: #223049;
+    border: 1px solid #3f5178; border-radius: 10px; padding: 10px 16px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.4); opacity: 0; transform: translateY(8px);
+    transition: .2s; pointer-events: none; max-width: 360px;
+  }
+  .toast.show { opacity: 1; transform: translateY(0); }
+  .toast.err { border-color: rgba(255,107,107,.6); color: #ffc4c4; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>站内文档搜索 · 影子对照网关</h1>
+    <div class="sub">旧版即时应答，新版影子对照；封存后的轮次不再接受提交，迟到响应一律丢弃。</div>
+  </div>
+  <div class="spacer"></div>
+  <span class="pill">当前轮次 <b id="hdr-round">-</b></span>
+  <span class="pill">在途影子 <b id="hdr-inflight">0</b> / <b id="hdr-max">4</b></span>
+  <span class="pill">后台联通 <b id="hdr-health">-</b></span>
+</header>
+
+<main>
+  <section class="card">
+    <h2>轮次控制</h2>
+    <div class="row" style="margin-bottom:12px;">
+      <button id="btn-new-round" class="primary">开启一轮对照</button>
+      <button id="btn-seal" class="danger">封存本轮并另开一轮</button>
+      <span class="hint" id="round-hint"></span>
+    </div>
+    <div class="row">
+      <label class="hint" for="delay-input">新版延迟（毫秒，仅影响之后发起的影子请求）</label>
+      <input id="delay-input" type="number" min="0" max="60000" step="100" style="width:120px" />
+      <button id="btn-delay">应用</button>
+      <span class="hint" id="delay-hint"></span>
+    </div>
+  </section>
+
+  <section id="switch-banner"></section>
+
+  <section class="card">
+    <h2>提交搜索词（旧版响应立即返回）</h2>
+    <form id="search-form" class="row">
+      <input id="query-input" type="text" placeholder="输入搜索词，例如：部署 或 缓存" maxlength="200" autocomplete="off" />
+      <button type="submit" class="primary" id="btn-search">搜索并对照</button>
+    </form>
+    <div class="legacy-out" id="last-legacy">尚未提交搜索词。</div>
+  </section>
+
+  <section class="card">
+    <h2>本轮逐条对照</h2>
+    <div class="counts" id="round-counts" style="margin-bottom:12px;"></div>
+    <div id="requests"><div class="empty">本轮尚无搜索请求。</div></div>
+  </section>
+
+  <section class="card">
+    <h2>历史轮次</h2>
+    <div class="roundlist" id="rounds"></div>
+  </section>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const STATUS_LABEL = {
+  pending: "进行中", matched: "一致", mismatch: "不一致",
+  failed: "失败", skipped: "跳过", incomplete: "未完成",
+};
+const $ = (id) => document.getElementById(id);
+let viewingRoundId = null;   // null => follow current round
+let lastState = null;
+let pollTimer = null;
+let lastRoundId = null;
+let lastHealth = "";
+
+function toast(msg, isErr = false) {
+  const el = $("toast");
+  el.textContent = msg;
+  el.classList.toggle("err", isErr);
+  el.classList.add("show");
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => el.classList.remove("show"), 3200);
+}
+
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+  let body = null;
+  try { body = await res.json(); } catch (_) { /* no body */ }
+  if (!res.ok) {
+    const msg = (body && (body.detail || body.message)) || `HTTP ${res.status}`;
+    throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+  }
+  return body;
+}
+
+function esc(text) {
+  return String(text ?? "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+function badge(status) {
+  return `<span class="badge ${esc(status)}">${esc(STATUS_LABEL[status] || status)}</span>`;
+}
+
+function renderRoundList(state) {
+  const list = $("rounds");
+  if (!state.rounds.length) { list.innerHTML = `<div class="empty">暂无轮次。</div>`; return; }
+  const activeId = viewingRoundId || state.current_round_id;
+  list.innerHTML = state.rounds.map((r) => {
+    const counts = Object.entries(r.counts || {})
+      .filter(([, v]) => v > 0)
+      .map(([k, v]) => `<span>${esc(STATUS_LABEL[k] || k)} <b>${v}</b></span>`)
+      .join("");
+    const stateTag = r.state === "sealed" ? `已封存 ${esc(r.sealed_at || "")}` : "进行中";
+    const switchTag = r.can_switch ? `<span class="badge matched">可切换</span>` : "";
+    return `
+      <div class="rounditem ${r.id === activeId ? "active" : ""}" data-round="${esc(r.id)}">
+        <span class="rid">${esc(r.id)}</span>
+        <span class="hint">${esc(stateTag)}</span>
+        ${r.is_current ? `<span class="badge pending">当前</span>` : ""}
+        ${switchTag}
+        <span class="counts">${counts || "<span>无请求</span>"}</span>
+        <span class="spacer" style="flex:1"></span>
+        <span class="hint">共 ${r.request_count} 条${r.pending_count ? `，在途 ${r.pending_count}` : ""}</span>
+      </div>`;
+  }).join("");
+  list.querySelectorAll(".rounditem").forEach((el) => {
+    el.addEventListener("click", () => {
+      viewingRoundId = el.dataset.round === state.current_round_id ? null : el.dataset.round;
+      refresh();
+    });
+  });
+}
+
+function renderPositions(record) {
+  const cmp = record.comparison;
+  if (record.legacy.error) {
+    return `<div class="empty">旧版请求失败：${esc(record.legacy.error)}（未发起影子请求）</div>`;
+  }
+  if (record.shadow.status === "failed") {
+    return `<div class="empty">新版影子请求失败：${esc(record.shadow.error || "未知错误")}</div>`;
+  }
+  if (record.shadow.status === "skipped") {
+    return `<div class="empty">已跳过：${esc(record.shadow.error || "在途影子请求已达上限")}</div>`;
+  }
+  if (record.shadow.status === "incomplete") {
+    return `<div class="empty">未完成：${esc(record.shadow.error || "封存时仍在途")}</div>`;
+  }
+  if (record.shadow.status === "pending") {
+    return `<div class="empty">新版影子请求进行中，旧版结果已返回…</div>`;
+  }
+  if (!cmp) {
+    return `<div class="empty">暂无对照结果。</div>`;
+  }
+  const rows = cmp.positions.map((p) => `
+    <tr class="${p.match ? "same" : "diff"}">
+      <td class="rank">${p.rank}</td>
+      <td>${p.legacy_doc_id ? `<code>${esc(p.legacy_doc_id)}</code>` : `<span class="hint">—</span>`}</td>
+      <td>${p.candidate_doc_id ? `<code>${esc(p.candidate_doc_id)}</code>` : `<span class="hint">—</span>`}</td>
+      <td class="mark">${p.match ? "✓" : "✗"}</td>
+    </tr>`).join("");
+  return `
+    <table class="cmp">
+      <thead><tr><th>排名</th><th>旧版文档编号</th><th>新版文档编号</th><th>结果</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function renderRequests(round) {
+  const box = $("requests");
+  if (!round || !round.requests.length) {
+    box.innerHTML = `<div class="empty">本轮尚无搜索请求。</div>`;
+    return;
+  }
+  box.innerHTML = round.requests.map((r) => {
+    const when = esc(r.submitted_at || "");
+    const delay = r.delay_ms ? `，新版延迟 ${r.delay_ms}ms` : "";
+    return `
+      <div class="req">
+        <div class="req-head">
+          <span class="q">#${r.seq} ${esc(r.query)}</span>
+          ${badge(r.status)}
+          <span class="meta">${when}${delay}</span>
+        </div>
+        <div class="req-body">
+          ${renderPositions(r)}
+          <div class="legacy-out">
+            <div>旧版响应（立即返回，前 ${r.legacy.doc_ids.length} 个编号）：
+              ${r.legacy.doc_ids.length
+                ? r.legacy.doc_ids.map((d) => `<code>${esc(d)}</code>`).join(" → ")
+                : "<span>（空结果）</span>"}
+            </div>
+          </div>
+        </div>
+      </div>`;
+  }).join("");
+}
+
+function renderBanner(round) {
+  const el = $("switch-banner");
+  if (!round) { el.innerHTML = ""; return; }
+  const sealed = round.state === "sealed";
+  const label = sealed ? "本轮已封存" : "本轮尚未封存";
+  if (round.can_switch) {
+    el.innerHTML = `
+      <div class="banner ok">
+        <span class="icon">✓</span>
+        <div>
+          <div><b>可以切换。</b>${label}，共 ${round.request_count} 条请求且全部对照一致。</div>
+          <div class="hint">如需继续观察，可随时封存本轮并开启新一轮。</div>
+        </div>
+      </div>`;
+    return;
+  }
+  const reasons = round.blockers.length
+    ? `<ul>${round.blockers.map((b) => `<li>${esc(b)}</li>`).join("")}</ul>`
+    : "";
+  el.innerHTML = `
+    <div class="banner warn">
+      <span class="icon">!</span>
+      <div>
+        <div><b>暂不可切换。</b>${label}；需要至少 1 条请求且全部对照一致。</div>
+        ${reasons}
+      </div>
+    </div>`;
+}
+
+function renderCounts(round) {
+  const el = $("round-counts");
+  if (!round) { el.innerHTML = ""; return; }
+  const parts = Object.entries(round.counts || {})
+    .filter(([, v]) => v > 0)
+    .map(([k, v]) => `<span>${esc(STATUS_LABEL[k] || k)} <b>${v}</b></span>`);
+  el.innerHTML = parts.length ? parts.join("") : `<span>无请求</span>`;
+}
+
+function updateHeader(state, round) {
+  $("hdr-round").textContent = state.current_round_id || "-";
+  $("hdr-inflight").textContent = state.inflight;
+  $("hdr-max").textContent = state.max_inflight;
+  const delayInput = $("delay-input");
+  if (document.activeElement !== delayInput) {
+    delayInput.value = state.shadow_delay_ms;
+  }
+  $("delay-hint").textContent = `当前生效：${state.shadow_delay_ms}ms`;
+  $("round-hint").textContent = round
+    ? (round.state === "sealed"
+        ? `正在查看已封存轮次 ${round.id}（只读）；提交的搜索词会进入当前轮次 ${state.current_round_id}。`
+        : `本轮 ${round.id} 进行中，可提交搜索词。`)
+    : "";
+  $("query-input").disabled = false;
+  $("btn-search").disabled = false;
+}
+
+async function refresh() {
+  try {
+    const state = await api("/api/state");
+    lastState = state;
+    if (viewingRoundId === state.current_round_id) viewingRoundId = null;
+    const round = viewingRoundId
+      ? (await api(`/api/rounds/${encodeURIComponent(viewingRoundId)}`))
+      : state.current_round;
+    updateHeader(state, round);
+    renderRoundList(state);
+    renderBanner(round);
+    renderCounts(round);
+    renderRequests(round);
+  } catch (err) {
+    toast(`刷新失败：${err.message}`, true);
+  }
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(refresh, 1000);
+}
+
+async function checkHealth() {
+  const el = $("hdr-health");
+  try {
+    const health = await api("/api/health");
+    const ok = health.backends.legacy.ok && health.backends.candidate.ok;
+    const text = ok ? "两版正常" : "有版本异常";
+    lastHealth = ok ? "ok" : "bad";
+    el.textContent = text;
+    el.style.color = ok ? "var(--ok)" : "var(--bad)";
+  } catch (_) {
+    lastHealth = "down";
+    el.textContent = "不可用";
+    el.style.color = "var(--bad)";
+  }
+}
+
+async function submitSearch(event) {
+  event.preventDefault();
+  const input = $("query-input");
+  const query = input.value.trim();
+  if (!query) { toast("请输入搜索词", true); return; }
+  const btn = $("btn-search");
+  btn.disabled = true;
+  $("last-legacy").innerHTML = `<div>正在请求旧版…</div>`;
+  const started = performance.now();
+  try {
+    const res = await api("/api/search", {
+      method: "POST",
+      body: JSON.stringify({ query }),
+    });
+    const elapsed = Math.round(performance.now() - started);
+    const ids = res.legacy.doc_ids || [];
+    $("last-legacy").innerHTML = `
+      <div>
+        旧版响应 ${elapsed}ms 返回（轮次 ${esc(res.round_id)}，第 ${res.round.seq ?? "?"} 条）：
+        ${ids.length
+          ? ids.map((d) => `<code>${esc(d)}</code>`).join(" → ")
+          : "<span>（空结果）</span>"}
+      </div>
+      <div class="hint" style="margin-top:6px;">
+        影子请求：${res.shadow.launched ? "已发起（后台对照中）" : `未发起（${esc(res.shadow.status)}）`}
+      </div>`;
+    input.value = "";
+    viewingRoundId = null;
+    refresh();
+  } catch (err) {
+    $("last-legacy").innerHTML = `<div style="color:#ffb0b0">提交失败：${esc(err.message)}</div>`;
+    toast(err.message, true);
+  } finally {
+    btn.disabled = false;
+    input.focus();
+  }
+}
+
+async function openRound() {
+  try {
+    const res = await api("/api/rounds", { method: "POST" });
+    viewingRoundId = null;
+    $("last-legacy").textContent = "尚未提交搜索词。";
+    toast(`已开启新一轮：${res.round.id}`);
+    refresh();
+  } catch (err) { toast(err.message, true); }
+}
+
+async function sealRound() {
+  const state = lastState;
+  if (!state || !state.current_round_id) return;
+  const wasEmpty = (state.current_round?.request_count ?? 0) === 0;
+  try {
+    const res = await api(`/api/rounds/${encodeURIComponent(state.current_round_id)}/seal`, { method: "POST" });
+    viewingRoundId = res.round.id;
+    toast(
+      wasEmpty
+        ? `已封存空轮次 ${res.round.id}，并开启 ${res.new_round?.id || "新一轮"}。`
+        : `已封存 ${res.round.id}，迟到响应将不再写入。`
+    );
+    refresh();
+  } catch (err) { toast(err.message, true); }
+}
+
+async function applyDelay() {
+  const value = Number($("delay-input").value);
+  if (!Number.isFinite(value) || value < 0 || value > 60000) {
+    toast("延迟需为 0–60000 毫秒", true);
+    return;
+  }
+  try {
+    const res = await api("/api/shadow-delay", {
+      method: "POST",
+      body: JSON.stringify({ delay_ms: value }),
+    });
+    toast(`新版延迟已设为 ${res.shadow_delay_ms}ms（仅影响之后的影子请求）`);
+    refresh();
+  } catch (err) { toast(err.message, true); }
+}
+
+$("search-form").addEventListener("submit", submitSearch);
+$("btn-new-round").addEventListener("click", openRound);
+$("btn-seal").addEventListener("click", sealRound);
+$("btn-delay").addEventListener("click", applyDelay);
+$("delay-input").addEventListener("keydown", (e) => { if (e.key === "Enter") applyDelay(); });
+
+checkHealth();
+setInterval(checkHealth, 15000);
+refresh();
+</script>
+</body>
+</html>

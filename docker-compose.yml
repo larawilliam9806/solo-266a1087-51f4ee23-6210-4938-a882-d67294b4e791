@@ -1,0 +1,51 @@
+services:
+  legacy-search:
+    build: ./services/search_service
+    environment:
+      SEARCH_RANK_VARIANT: legacy
+      SEARCH_DELAY_MS: "0"
+    ports:
+      - "8101:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  candidate-search:
+    build: ./services/search_service
+    environment:
+      SEARCH_RANK_VARIANT: candidate
+      # Base latency of the new build; the gateway UI can add per-request delay.
+      SEARCH_DELAY_MS: "600"
+    ports:
+      - "8102:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  gateway:
+    build: ./gateway
+    depends_on:
+      legacy-search:
+        condition: service_healthy
+      candidate-search:
+        condition: service_healthy
+    environment:
+      LEGACY_SEARCH_URL: http://legacy-search:8000
+      CANDIDATE_SEARCH_URL: http://candidate-search:8000
+      MAX_INFLIGHT_SHADOWS: "4"
+      COMPARISON_LIMIT: "10"
+      SHADOW_DEFAULT_DELAY_MS: "600"
+      # Long enough that a deliberately slowed new build can still answer.
+      SHADOW_TIMEOUT_MS: "8000"
+      LEGACY_TIMEOUT_MS: "5000"
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/state', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
